@@ -39,6 +39,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.MimeTypeMap;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -130,6 +131,7 @@ public class MainActivity extends Activity {
         long dur, size = -1;
         Map<String, String> hd;
         int q;
+        String mime;
     }
 
     class Js {
@@ -260,14 +262,69 @@ public class MainActivity extends Activity {
         else registerReceiver(doneRx, fl);
         setupWeb();
 
-        Uri d = getIntent() != null ? getIntent().getData() : null;
-        if (d != null) go(d.toString()); else home();
+        if (!handleIntent(getIntent())) home();
     }
 
     @Override
     protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
-        if (i.getData() != null) go(i.getData().toString());
+        handleIntent(i);
+    }
+
+    boolean skipClip = false;
+    boolean clipAsking = false;
+
+    String firstUrl(String t) {
+        if (t == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("https?://[^\\s]+").matcher(t);
+        if (!m.find()) return null;
+        String u = m.group();
+        while (u.length() > 0 && ".,;:!?)\"'".indexOf(u.charAt(u.length() - 1)) >= 0) u = u.substring(0, u.length() - 1);
+        return u;
+    }
+
+    boolean handleIntent(Intent i) {
+        if (i == null) return false;
+        if (Intent.ACTION_SEND.equals(i.getAction())) {
+            String u = firstUrl(i.getStringExtra(Intent.EXTRA_TEXT));
+            if (u == null) { toast("No encontré un enlace en lo que compartiste"); return false; }
+            skipClip = true;
+            go(u);
+            return true;
+        }
+        if (i.getData() != null) { skipClip = true; go(i.getData().toString()); return true; }
+        return false;
+    }
+
+    void checkClipboard() {
+        if (skipClip) { skipClip = false; return; }
+        if (clipAsking) return;
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (!cm.hasPrimaryClip() || cm.getPrimaryClip().getItemCount() == 0) return;
+            CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+            final String u = firstUrl(t == null ? null : t.toString());
+            if (u == null) return;
+            android.content.SharedPreferences sp = getSharedPreferences("cpe", MODE_PRIVATE);
+            if (u.equals(sp.getString("lastClip", ""))) return;
+            sp.edit().putString("lastClip", u).apply();
+            clipAsking = true;
+            String shown = u.length() > 90 ? u.substring(0, 90) + "…" : u;
+            new AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                    .setTitle("Enlace copiado")
+                    .setMessage(shown)
+                    .setPositiveButton("Abrir", (d, w) -> go(u))
+                    .setNeutralButton("Descargar archivo", (d, w) -> showLink(u, null))
+                    .setNegativeButton("Ignorar", null)
+                    .setOnDismissListener(d -> clipAsking = false)
+                    .show();
+        } catch (Exception e) { }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && web != null) checkClipboard();
     }
 
     void home() { web.loadDataWithBaseURL("https://inicio.cpe/", START, "text/html", "utf-8", null); url.setText(""); }
@@ -401,6 +458,13 @@ public class MainActivity extends Activity {
             if (u == null || !u.startsWith("http")) { toast("Este enlace no se puede descargar directamente"); return -1; }
             DownloadManager.Request r = new DownloadManager.Request(Uri.parse(u));
             String name = URLUtil.guessFileName(u, cd, mime);
+            if (mime != null && (mime.startsWith("video/") || mime.startsWith("audio/") || mime.startsWith("image/"))) {
+                String want = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime.split(";")[0].trim());
+                if (want != null && !name.toLowerCase().endsWith("." + want)) {
+                    int dd = name.lastIndexOf('.');
+                    name = (dd > 0 ? name.substring(0, dd) : name) + "." + want;
+                }
+            }
             String ck = CookieManager.getInstance().getCookie(u);
             if (ck != null) r.addRequestHeader("Cookie", ck);
             r.addRequestHeader("User-Agent", web.getSettings().getUserAgentString());
@@ -472,6 +536,7 @@ public class MainActivity extends Activity {
     }
 
     String describe(Item it) {
+        if (it.type.equals("page")) return "🌐 Esto es una página web, no un archivo de video o imagen. Toca «Abrir página», reproduce el video y usa el botón ⬇ de la app.";
         StringBuilder s = new StringBuilder();
         if (it.type.equals("i")) {
             s.append("🖼️ ").append(it.ext.isEmpty() ? "IMG" : it.ext.toUpperCase());
@@ -510,7 +575,9 @@ public class MainActivity extends Activity {
                         c.disconnect();
                         if (ct != null) {
                             ct = ct.toLowerCase();
-                            if (ct.startsWith("image/")) it.type = "i";
+                            it.mime = ct;
+                            if (ct.startsWith("text/html") || ct.startsWith("application/xhtml")) it.type = "page";
+                            else if (ct.startsWith("image/")) it.type = "i";
                             else if (ct.startsWith("video/") || ct.startsWith("audio/")) { it.type = "v"; it.isAudioFile = ct.startsWith("audio/"); }
                             if (it.ext.isEmpty() && ct.contains("/")) {
                                 String sub = ct.substring(ct.indexOf('/') + 1);
@@ -719,6 +786,7 @@ public class MainActivity extends Activity {
                 ? new String[]{"Original (sin cambios)", "JPG calidad alta (hasta 2048 px)", "JPG calidad media (1280 px)", "JPG calidad baja (720 px)"}
                 : it.type.equals("v")
                 ? (it.isAudioFile ? new String[]{"Audio original"} : new String[]{"🎬 Video MP4 (calidad original)", "🎧 Solo audio (M4A)"})
+                : it.type.equals("page") ? new String[]{"No hay un archivo que descargar en este enlace"}
                 : new String[]{"Archivo original"};
         for (int i = 0; i < o.length; i++) {
             RadioButton b = new RadioButton(this);
@@ -751,6 +819,7 @@ public class MainActivity extends Activity {
         it.type = kind != null && !kind.isEmpty() ? kind : guessType(it.ext);
         final boolean[] dead = {false};
         final String[] built = {""};
+        final AlertDialog[] dref = {null};
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(8), dp(20), dp(8));
@@ -770,6 +839,8 @@ public class MainActivity extends Activity {
         final Runnable refresh = () -> {
             if (it.thumb != null) pv.setImageBitmap(it.thumb);
             tv.setText(it.title + "\n" + it.info);
+            if (dref[0] != null && dref[0].getButton(AlertDialog.BUTTON_POSITIVE) != null)
+                dref[0].getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(!it.type.equals("page"));
             String key = it.type + it.isAudioFile;
             if (!built[0].equals(key)) { built[0] = key; buildOpts(rg, it); }
         };
@@ -780,6 +851,7 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancelar", null)
                 .setNeutralButton("Abrir página", (d, w) -> web.loadUrl(u)).create();
+        dref[0] = dlg;
         dlg.setOnDismissListener(d -> dead[0] = true);
         dlg.show();
         refresh.run();
@@ -849,6 +921,7 @@ public class MainActivity extends Activity {
     }
 
     void startItem(Item it) {
+        if (it.type.equals("page")) { toast("Esto es una página web, no un archivo. Ábrela y usa el botón ⬇ al reproducir el video."); return; }
         String name = URLUtil.guessFileName(it.url, null, null);
         if (it.audio && !it.isAudioFile) {
             long id = download(it.url, null, null);
@@ -857,7 +930,7 @@ public class MainActivity extends Activity {
                 audioJobs.put(id, d > 0 ? name.substring(0, d) : name);
                 toast("Descargando el video para extraer el audio…");
             }
-        } else download(it.url, null, null);
+        } else download(it.url, null, it.mime);
     }
 
     void extract(long id, String base) {
@@ -924,7 +997,7 @@ public class MainActivity extends Activity {
 
     void showMenu(View anchor) {
         PopupMenu pm = new PopupMenu(this, anchor);
-        pm.getMenu().add(0, 7, -1, "⬇ Descargar desde un enlace…");
+        pm.getMenu().add(0, 7, 0, "⬇ Descargar desde un enlace…");
         pm.getMenu().add(0, 1, 0, desktop ? "Modo móvil" : "Modo escritorio");
         pm.getMenu().add(0, 2, 1, "Copiar enlace");
         pm.getMenu().add(0, 3, 2, "Compartir enlace");
