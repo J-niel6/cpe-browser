@@ -15,6 +15,7 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.GradientDrawable;
@@ -28,6 +29,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.text.InputType;
 import android.view.Gravity;
@@ -56,6 +58,9 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -89,7 +94,8 @@ public class MainActivity extends Activity {
             + "<p><a style='color:#8fd0ff' href='https://www.google.com'>Google</a> &nbsp; "
             + "<a style='color:#8fd0ff' href='https://es.wikipedia.org'>Wikipedia</a> &nbsp; "
             + "<a style='color:#8fd0ff' href='https://www.pexels.com'>Pexels</a></p>"
-            + "<p style='color:#8fb0d8;font-size:14px'>Mantén pulsada una imagen para descargarla, o toca ⬇ para ver los archivos de la página.</p></body></html>";
+            + "<p><a style='display:inline-block;background:#3BA4FF;color:#fff;padding:12px 20px;border-radius:24px;text-decoration:none' href='cpe://link'>⬇ Descargar desde un enlace</a></p>"
+            + "<p style='color:#8fb0d8;font-size:14px'>Mantén pulsada cualquier foto o video para descargarlo, o pega el enlace directo de un archivo en la barra.</p></body></html>";
     static final String SCAN = "(function(){var o=[];function a(u,t){if(!u)return;try{u=new URL(u,location.href).href;if(/^https?:/.test(u))o.push([t,u])}catch(e){}}"
             + "document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src,'v');v.querySelectorAll('source').forEach(function(s){a(s.src,'v')})});"
             + "document.querySelectorAll('img').forEach(function(i){if((i.naturalWidth||0)>=120)a(i.currentSrc||i.src,'i')});"
@@ -105,11 +111,13 @@ public class MainActivity extends Activity {
     View custom;
     WebChromeClient.CustomViewCallback cvCb;
     ValueCallback<Uri[]> fileCb;
-    static final String HOOK = "(function(){if(window.__cpeh)return;window.__cpeh=1;document.addEventListener('play',function(e){var v=e.target;if(!v||v.tagName!=='VIDEO')return;CpeApp.onPlay(v.currentSrc||v.src||'')},true)})()";
+    static final String HOOK = "(function(){if(window.__cpeh)return;window.__cpeh=1;document.addEventListener('play',function(e){var v=e.target;if(!v||v.tagName!=='VIDEO')return;CpeApp.onPlay(v.currentSrc||v.src||'')},true);var t=null,sx=0,sy=0;function pick(x,y){var els=document.elementsFromPoint(x,y);for(var i=0;i<els.length;i++){var el=els[i],u='',k='';if(el.tagName==='VIDEO'){u=el.currentSrc||el.src||'';if(!u){var s=el.querySelector('source');u=s?s.src:''}k='v'}else if(el.tagName==='IMG'){u=el.currentSrc||el.src||'';k='i'}else{var bg=getComputedStyle(el).backgroundImage||'';var a=bg.indexOf('url(');if(a>=0){var b=bg.indexOf(')',a);u=bg.substring(a+4,b).split(String.fromCharCode(34)).join('').split(String.fromCharCode(39)).join('');k='i'}}if(u){try{u=new URL(u,location.href).href}catch(e){}CpeApp.onPress(k,u);return}}}document.addEventListener('touchstart',function(e){var p=e.touches[0];sx=p.clientX;sy=p.clientY;clearTimeout(t);t=setTimeout(function(){pick(sx,sy)},600)},{passive:true,capture:true});document.addEventListener('touchmove',function(e){var p=e.touches[0];if(Math.abs(p.clientX-sx)>10||Math.abs(p.clientY-sy)>10)clearTimeout(t)},{passive:true,capture:true});document.addEventListener('touchend',function(){clearTimeout(t)},{passive:true,capture:true});document.addEventListener('touchcancel',function(){clearTimeout(t)},{passive:true,capture:true});})()";
     final ExecutorService pool = Executors.newFixedThreadPool(3);
     final Map<Long, String> audioJobs = new ConcurrentHashMap<>();
     TextView offer;
     String playing;
+    String lastLink = "";
+    long lastLinkT = 0;
     boolean warned = false;
     BroadcastReceiver doneRx;
     final Runnable hideOffer = new Runnable() { public void run() { offer.setVisibility(View.GONE); } };
@@ -121,9 +129,13 @@ public class MainActivity extends Activity {
         int w, h;
         long dur, size = -1;
         Map<String, String> hd;
+        int q;
     }
 
     class Js {
+        @JavascriptInterface
+        public void onPress(final String kind, final String u) { runOnUiThread(new Runnable() { public void run() { handlePress(kind, u); } }); }
+
         @JavascriptInterface
         public void onPlay(final String src) { runOnUiThread(new Runnable() { public void run() { handlePlay(src); } }); }
     }
@@ -281,6 +293,7 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 String u = r.getUrl().toString();
+                if (u.startsWith("cpe://link")) { askLink(); return true; }
                 if (u.startsWith("http://") || u.startsWith("https://")) return false;
                 try { startActivity(new Intent(Intent.ACTION_VIEW, r.getUrl())); } catch (Exception e) { }
                 return true;
@@ -353,10 +366,7 @@ public class MainActivity extends Activity {
             int t = h.getType();
             if (ex == null) return false;
             if (t == WebView.HitTestResult.IMAGE_TYPE || t == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
-                new AlertDialog.Builder(this).setTitle("Imagen")
-                        .setItems(new String[]{"⬇ Descargar imagen", "📋 Copiar enlace de la imagen"}, (d, i) -> {
-                            if (i == 0) download(ex, null, null); else copy(ex);
-                        }).show();
+                showLink(ex, "i");
                 return true;
             }
             if (t == WebView.HitTestResult.SRC_ANCHOR_TYPE) {
@@ -379,6 +389,7 @@ public class MainActivity extends Activity {
         if (in.matches("^[a-zA-Z][a-zA-Z0-9+.-]*://.*")) u = in;
         else if (!in.contains(" ") && in.contains(".") && !in.endsWith(".")) u = "https://" + in;
         else u = "https://www.google.com/search?q=" + Uri.encode(in);
+        if (u.startsWith("http") && isMediaExt(extOf(u))) { showLink(u, null); return; }
         web.loadUrl(u);
         ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(url.getWindowToken(), 0);
         url.clearFocus();
@@ -495,7 +506,19 @@ public class MainActivity extends Activity {
                     try {
                         HttpURLConnection c = open(it.url, it.hd, "HEAD");
                         it.size = c.getContentLengthLong();
+                        String ct = c.getContentType();
                         c.disconnect();
+                        if (ct != null) {
+                            ct = ct.toLowerCase();
+                            if (ct.startsWith("image/")) it.type = "i";
+                            else if (ct.startsWith("video/") || ct.startsWith("audio/")) { it.type = "v"; it.isAudioFile = ct.startsWith("audio/"); }
+                            if (it.ext.isEmpty() && ct.contains("/")) {
+                                String sub = ct.substring(ct.indexOf('/') + 1);
+                                int sc = sub.indexOf(';');
+                                if (sc > 0) sub = sub.substring(0, sc);
+                                it.ext = sub.equals("jpeg") ? "jpg" : sub.equals("mpeg") ? "mp3" : sub;
+                            }
+                        }
                     } catch (Exception e) { }
                     if (dead[0]) return;
                     if (it.type.equals("v")) {
@@ -507,11 +530,11 @@ public class MainActivity extends Activity {
                             it.h = (int) pl(m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT));
                             if (!it.isAudioFile && !dead[0]) {
                                 Bitmap f = m.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-                                if (f != null) it.thumb = Bitmap.createScaledBitmap(f, 200, Math.max(1, f.getHeight() * 200 / f.getWidth()), true);
+                                if (f != null) it.thumb = Bitmap.createScaledBitmap(f, 480, Math.max(1, f.getHeight() * 480 / f.getWidth()), true);
                             }
                         } catch (Exception e) { }
                         finally { try { m.release(); } catch (Exception e) { } }
-                    } else {
+                    } else if (it.type.equals("i")) {
                         HttpURLConnection c = open(it.url, it.hd, "GET");
                         InputStream in = c.getInputStream();
                         BitmapFactory.Options o = new BitmapFactory.Options();
@@ -525,7 +548,7 @@ public class MainActivity extends Activity {
                             c = open(it.url, it.hd, "GET");
                             in = c.getInputStream();
                             BitmapFactory.Options o2 = new BitmapFactory.Options();
-                            o2.inSampleSize = Math.max(1, it.w / 240);
+                            o2.inSampleSize = Math.max(1, it.w / 480);
                             it.thumb = BitmapFactory.decodeStream(in, null, o2);
                             in.close();
                             c.disconnect();
@@ -649,6 +672,182 @@ public class MainActivity extends Activity {
         });
     }
 
+    boolean isMediaExt(String e) {
+        return e.equals("jpg") || e.equals("jpeg") || e.equals("png") || e.equals("gif") || e.equals("webp") || e.equals("bmp")
+                || e.equals("mp4") || e.equals("webm") || e.equals("mkv") || e.equals("mov") || e.equals("m4v") || e.equals("mp3") || e.equals("m4a");
+    }
+
+    String guessType(String e) {
+        if (e.equals("jpg") || e.equals("jpeg") || e.equals("png") || e.equals("gif") || e.equals("webp") || e.equals("bmp")) return "i";
+        return isMediaExt(e) ? "v" : "f";
+    }
+
+    void handlePress(String kind, String u) {
+        if (u == null) return;
+        if (u.startsWith("http") && !u.toLowerCase().contains(".m3u8")) { showLink(u, kind); return; }
+        if ("v".equals(kind)) {
+            String cand = null;
+            synchronized (sniffed) { for (String x : sniffed) cand = x; }
+            if (cand != null) showLink(cand, "v");
+            else toast("Este video usa transmisión protegida o por fragmentos; no se puede descargar.");
+        } else toast("Esta imagen no se puede descargar directamente.");
+    }
+
+    void askLink() {
+        final EditText et = new EditText(this);
+        et.setHint("https://…/foto.jpg  o  video.mp4");
+        et.setHintTextColor(0xFF8FB0D8);
+        et.setTextColor(Color.WHITE);
+        et.setSingleLine(true);
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm.hasPrimaryClip()) {
+                CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+                if (t != null && t.toString().trim().startsWith("http")) et.setText(t.toString().trim());
+            }
+        } catch (Exception e) { }
+        new AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK).setTitle("Descargar desde un enlace")
+                .setMessage("Pega el enlace directo de una imagen, foto o video.").setView(et)
+                .setPositiveButton("Continuar", (d, w) -> showLink(et.getText().toString().trim(), null))
+                .setNegativeButton("Cancelar", null).show();
+    }
+
+    void buildOpts(RadioGroup rg, final Item it) {
+        rg.setOnCheckedChangeListener(null);
+        rg.removeAllViews();
+        String[] o = it.type.equals("i")
+                ? new String[]{"Original (sin cambios)", "JPG calidad alta (hasta 2048 px)", "JPG calidad media (1280 px)", "JPG calidad baja (720 px)"}
+                : it.type.equals("v")
+                ? (it.isAudioFile ? new String[]{"Audio original"} : new String[]{"🎬 Video MP4 (calidad original)", "🎧 Solo audio (M4A)"})
+                : new String[]{"Archivo original"};
+        for (int i = 0; i < o.length; i++) {
+            RadioButton b = new RadioButton(this);
+            b.setId(100 + i);
+            b.setText(o[i]);
+            b.setTextColor(Color.WHITE);
+            rg.addView(b);
+        }
+        if (it.q >= o.length) it.q = 0;
+        rg.check(100 + it.q);
+        it.audio = it.type.equals("v") && !it.isAudioFile && it.q == 1;
+        rg.setOnCheckedChangeListener((g, id) -> {
+            it.q = id - 100;
+            it.audio = it.type.equals("v") && !it.isAudioFile && it.q == 1;
+        });
+    }
+
+    void showLink(final String u, String kind) {
+        if (u == null || !u.startsWith("http")) { toast("Escribe un enlace que empiece con http o https"); return; }
+        long now = SystemClock.elapsedRealtime();
+        if (u.equals(lastLink) && now - lastLinkT < 2500) return;
+        lastLink = u;
+        lastLinkT = now;
+        final Item it = new Item();
+        it.url = u;
+        it.title = nameOf(u);
+        it.ext = extOf(u);
+        it.hd = headersFor(u);
+        it.isAudioFile = it.ext.equals("mp3") || it.ext.equals("m4a");
+        it.type = kind != null && !kind.isEmpty() ? kind : guessType(it.ext);
+        final boolean[] dead = {false};
+        final String[] built = {""};
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(8), dp(20), dp(8));
+        final ImageView pv = new ImageView(this);
+        pv.setBackgroundColor(CARD);
+        pv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        box.addView(pv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(190)));
+        final TextView tv = new TextView(this);
+        tv.setTextColor(Color.WHITE);
+        tv.setTextSize(13);
+        tv.setPadding(0, dp(10), 0, dp(6));
+        box.addView(tv);
+        final RadioGroup rg = new RadioGroup(this);
+        box.addView(rg);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(box);
+        final Runnable refresh = () -> {
+            if (it.thumb != null) pv.setImageBitmap(it.thumb);
+            tv.setText(it.title + "\n" + it.info);
+            String key = it.type + it.isAudioFile;
+            if (!built[0].equals(key)) { built[0] = key; buildOpts(rg, it); }
+        };
+        final AlertDialog dlg = new AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                .setTitle("Descargar").setView(sv)
+                .setPositiveButton("Descargar", (d, w) -> {
+                    if (it.type.equals("i") && it.q > 0) saveScaled(it); else startItem(it);
+                })
+                .setNegativeButton("Cancelar", null)
+                .setNeutralButton("Abrir página", (d, w) -> web.loadUrl(u)).create();
+        dlg.setOnDismissListener(d -> dead[0] = true);
+        dlg.show();
+        refresh.run();
+        loadMeta(it, refresh, dead);
+    }
+
+    java.io.OutputStream openOut(String name, String mime) throws Exception {
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/CpeBrowser");
+            Uri o = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            return getContentResolver().openOutputStream(o);
+        }
+        File d = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "CpeBrowser");
+        d.mkdirs();
+        return new java.io.FileOutputStream(new File(d, name));
+    }
+
+    void saveScaled(final Item it) {
+        toast("Procesando imagen…");
+        pool.execute(() -> {
+            try {
+                final int mx = it.q == 1 ? 2048 : it.q == 2 ? 1280 : 720;
+                final int ql = it.q == 1 ? 92 : it.q == 2 ? 85 : 75;
+                HttpURLConnection c = open(it.url, it.hd, "GET");
+                InputStream in = c.getInputStream();
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    bo.write(buf, 0, n);
+                    if (bo.size() > 40000000) throw new Exception("la imagen es demasiado grande");
+                }
+                in.close();
+                c.disconnect();
+                byte[] data = bo.toByteArray();
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                if (o.outWidth <= 0) throw new Exception("no es una imagen válida");
+                int ss = 1;
+                while (Math.max(o.outWidth, o.outHeight) / ss > mx * 2) ss *= 2;
+                BitmapFactory.Options o2 = new BitmapFactory.Options();
+                o2.inSampleSize = ss;
+                Bitmap b = BitmapFactory.decodeByteArray(data, 0, data.length, o2);
+                if (b == null) throw new Exception("no se pudo leer la imagen");
+                float k = Math.min(1f, (float) mx / Math.max(b.getWidth(), b.getHeight()));
+                if (k < 1f) b = Bitmap.createScaledBitmap(b, Math.round(b.getWidth() * k), Math.round(b.getHeight() * k), true);
+                Bitmap r = Bitmap.createBitmap(b.getWidth(), b.getHeight(), Bitmap.Config.ARGB_8888);
+                Canvas cvs = new Canvas(r);
+                cvs.drawColor(Color.WHITE);
+                cvs.drawBitmap(b, 0, 0, null);
+                String nm = URLUtil.guessFileName(it.url, null, null);
+                int dd = nm.lastIndexOf('.');
+                if (dd > 0) nm = nm.substring(0, dd);
+                final String name = nm + (it.q == 1 ? "_alta" : it.q == 2 ? "_media" : "_baja") + ".jpg";
+                java.io.OutputStream os = openOut(name, "image/jpeg");
+                r.compress(Bitmap.CompressFormat.JPEG, ql, os);
+                os.close();
+                runOnUiThread(() -> toast("🖼️ Imagen guardada: " + name + "\nEn Descargas/CpeBrowser"));
+            } catch (final Exception e) {
+                runOnUiThread(() -> toast("No se pudo guardar la imagen: " + e.getMessage()));
+            }
+        });
+    }
+
     void startItem(Item it) {
         String name = URLUtil.guessFileName(it.url, null, null);
         if (it.audio && !it.isAudioFile) {
@@ -725,6 +924,7 @@ public class MainActivity extends Activity {
 
     void showMenu(View anchor) {
         PopupMenu pm = new PopupMenu(this, anchor);
+        pm.getMenu().add(0, 7, -1, "⬇ Descargar desde un enlace…");
         pm.getMenu().add(0, 1, 0, desktop ? "Modo móvil" : "Modo escritorio");
         pm.getMenu().add(0, 2, 1, "Copiar enlace");
         pm.getMenu().add(0, 3, 2, "Compartir enlace");
@@ -739,6 +939,7 @@ public class MainActivity extends Activity {
                     web.getSettings().setUserAgentString(desktop ? UA_DESK : mobileUa);
                     web.reload();
                     break;
+                case 7: askLink(); break;
                 case 2: copy(cur); break;
                 case 3:
                     Intent s = new Intent(Intent.ACTION_SEND);
