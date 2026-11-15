@@ -4,19 +4,31 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.GradientDrawable;
+import android.media.MediaCodec;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
+import android.media.MediaMetadataRetriever;
+import android.media.MediaMuxer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -24,6 +36,7 @@ import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -33,25 +46,38 @@ import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONTokener;
 
+import java.io.File;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
@@ -79,6 +105,29 @@ public class MainActivity extends Activity {
     View custom;
     WebChromeClient.CustomViewCallback cvCb;
     ValueCallback<Uri[]> fileCb;
+    static final String HOOK = "(function(){if(window.__cpeh)return;window.__cpeh=1;document.addEventListener('play',function(e){var v=e.target;if(!v||v.tagName!=='VIDEO')return;CpeApp.onPlay(v.currentSrc||v.src||'')},true)})()";
+    final ExecutorService pool = Executors.newFixedThreadPool(3);
+    final Map<Long, String> audioJobs = new ConcurrentHashMap<>();
+    TextView offer;
+    String playing;
+    boolean warned = false;
+    BroadcastReceiver doneRx;
+    final Runnable hideOffer = new Runnable() { public void run() { offer.setVisibility(View.GONE); } };
+
+    static class Item {
+        String url, type, title, info = "Cargando información…", ext = "";
+        Bitmap thumb;
+        boolean checked, audio, isAudioFile;
+        int w, h;
+        long dur, size = -1;
+        Map<String, String> hd;
+    }
+
+    class Js {
+        @JavascriptInterface
+        public void onPlay(final String src) { runOnUiThread(new Runnable() { public void run() { handlePlay(src); } }); }
+    }
+
     String mobileUa;
     boolean desktop = false;
     final Set<String> sniffed = Collections.synchronizedSet(new LinkedHashSet<String>());
@@ -163,13 +212,40 @@ public class MainActivity extends Activity {
         nav.addView(btn("▶", v -> { if (web.canGoForward()) web.goForward(); }), lp);
         nav.addView(btn("⟳", v -> web.reload()), lp);
         nav.addView(btn("🏠", v -> home()), lp);
-        dl = btn("⬇", v -> showDownloads());
+        dl = btn("⬇", v -> showDownloads(null));
         dl.setTextColor(ACC);
         nav.addView(dl, lp);
         main.addView(nav);
 
         root.addView(main, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        offer = new TextView(this);
+        offer.setText("⬇  Descargar este video");
+        offer.setTextColor(Color.WHITE);
+        offer.setTextSize(16);
+        offer.setTypeface(null, android.graphics.Typeface.BOLD);
+        offer.setPadding(dp(20), dp(12), dp(20), dp(12));
+        GradientDrawable og = new GradientDrawable();
+        og.setColor(ACC);
+        og.setCornerRadius(dp(26));
+        offer.setBackground(og);
+        offer.setElevation(dp(8));
+        offer.setVisibility(View.GONE);
+        offer.setOnClickListener(v -> { offer.setVisibility(View.GONE); showDownloads(playing); });
+        FrameLayout.LayoutParams olp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        olp.bottomMargin = dp(70);
+        root.addView(offer, olp);
         setContentView(root);
+        doneRx = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                final long id = i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                final String nm = audioJobs.remove(id);
+                if (nm != null) pool.execute(new Runnable() { public void run() { extract(id, nm); } });
+            }
+        };
+        IntentFilter fl = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(doneRx, fl, Context.RECEIVER_EXPORTED);
+        else registerReceiver(doneRx, fl);
         setupWeb();
 
         Uri d = getIntent() != null ? getIntent().getData() : null;
@@ -214,11 +290,14 @@ public class MainActivity extends Activity {
             public void onPageStarted(WebView v, String pu, Bitmap f) {
                 if (!url.hasFocus() && !pu.contains("inicio.cpe")) url.setText(pu);
                 sniffed.clear();
+                warned = false;
+                offer.setVisibility(View.GONE);
                 badge();
             }
 
             @Override
             public void onPageFinished(WebView v, String pu) {
+                v.evaluateJavascript(HOOK, null);
                 if (!url.hasFocus() && !pu.contains("inicio.cpe")) url.setText(pu);
             }
 
@@ -249,6 +328,7 @@ public class MainActivity extends Activity {
                 root.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                offer.bringToFront();
             }
 
             @Override
@@ -264,6 +344,7 @@ public class MainActivity extends Activity {
             }
         });
 
+        web.addJavascriptInterface(new Js(), "CpeApp");
         web.setDownloadListener((u, ua, cd, mime, len) -> download(u, cd, mime));
 
         web.setOnLongClickListener(v -> {
@@ -304,9 +385,9 @@ public class MainActivity extends Activity {
         web.requestFocus();
     }
 
-    void download(String u, String cd, String mime) {
+    long download(String u, String cd, String mime) {
         try {
-            if (u == null || !u.startsWith("http")) { toast("Este enlace no se puede descargar directamente"); return; }
+            if (u == null || !u.startsWith("http")) { toast("Este enlace no se puede descargar directamente"); return -1; }
             DownloadManager.Request r = new DownloadManager.Request(Uri.parse(u));
             String name = URLUtil.guessFileName(u, cd, mime);
             String ck = CookieManager.getInstance().getCookie(u);
@@ -317,10 +398,12 @@ public class MainActivity extends Activity {
             r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "CpeBrowser/" + name);
             if (mime != null && !mime.isEmpty()) r.setMimeType(mime);
-            ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(r);
+            long id = ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(r);
             toast("Descargando: " + name + "\nSe guarda en Descargas/CpeBrowser");
+            return id;
         } catch (Exception e) {
             toast("No se pudo descargar: " + e.getMessage());
+            return -1;
         }
     }
 
@@ -330,10 +413,177 @@ public class MainActivity extends Activity {
         return n.length() > 40 ? n.substring(0, 40) + "…" : n;
     }
 
-    void showDownloads() {
+    void handlePlay(String src) {
+        String cand = null;
+        if (src != null && src.startsWith("http") && !src.toLowerCase().contains(".m3u8")) cand = src;
+        else synchronized (sniffed) { for (String x : sniffed) cand = x; }
+        if (cand == null) {
+            if (!warned) { warned = true; toast("Este video usa transmisión protegida o por fragmentos; no se puede descargar."); }
+            return;
+        }
+        playing = cand;
+        offer.setVisibility(View.VISIBLE);
+        offer.bringToFront();
+        offer.removeCallbacks(hideOffer);
+        offer.postDelayed(hideOffer, 10000);
+    }
+
+    String extOf(String u) {
+        String p = u.toLowerCase();
+        int q = p.indexOf('?');
+        if (q > 0) p = p.substring(0, q);
+        int d = p.lastIndexOf('.');
+        return d >= 0 && p.length() - d <= 5 ? p.substring(d + 1) : "";
+    }
+
+    Map<String, String> headersFor(String u) {
+        Map<String, String> h = new LinkedHashMap<>();
+        h.put("User-Agent", web.getSettings().getUserAgentString());
+        if (web.getUrl() != null) h.put("Referer", web.getUrl());
+        String ck = CookieManager.getInstance().getCookie(u);
+        if (ck != null) h.put("Cookie", ck);
+        return h;
+    }
+
+    long pl(String s) { try { return Long.parseLong(s); } catch (Exception e) { return 0; } }
+
+    String qual(int h) { return h >= 2160 ? "4K" : h >= 1440 ? "2K" : h >= 1080 ? "1080p" : h >= 720 ? "720p" : h >= 480 ? "480p" : h >= 360 ? "360p" : h + "p"; }
+
+    String dur(long ms) {
+        long s = ms / 1000;
+        return s >= 3600 ? String.format(Locale.US, "%d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
+                : String.format(Locale.US, "%02d:%02d", s / 60, s % 60);
+    }
+
+    String sz(long b) {
+        return b >= (1L << 30) ? String.format(Locale.US, "%.2f GB", b / 1073741824.0)
+                : b >= (1L << 20) ? String.format(Locale.US, "%.1f MB", b / 1048576.0) : (b / 1024) + " KB";
+    }
+
+    String describe(Item it) {
+        StringBuilder s = new StringBuilder();
+        if (it.type.equals("i")) {
+            s.append("🖼️ ").append(it.ext.isEmpty() ? "IMG" : it.ext.toUpperCase());
+            if (it.w > 0) s.append(" · ").append(it.w).append("×").append(it.h);
+        } else if (it.isAudioFile) {
+            s.append("🎵 ").append(it.ext.toUpperCase());
+        } else if (it.audio) {
+            s.append("🎧 Solo audio (M4A)");
+        } else {
+            s.append("🎬 ").append(it.ext.isEmpty() ? "VIDEO" : it.ext.toUpperCase());
+            if (it.h > 0) s.append(" · ").append(qual(it.h)).append(" ").append(it.w).append("×").append(it.h);
+        }
+        if (it.dur > 0) s.append(" · ").append(dur(it.dur));
+        if (it.size > 0) s.append(" · ").append(sz(it.size));
+        if (it.audio && !it.isAudioFile) s.append(" (baja el video y extrae el audio)");
+        return s.toString();
+    }
+
+    HttpURLConnection open(String u, Map<String, String> hd, String m) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+        c.setRequestMethod(m);
+        for (Map.Entry<String, String> e : hd.entrySet()) c.setRequestProperty(e.getKey(), e.getValue());
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(10000);
+        return c;
+    }
+
+    void loadMeta(final Item it, final Runnable refresh, final boolean[] dead) {
+        pool.execute(new Runnable() {
+            public void run() {
+                try {
+                    try {
+                        HttpURLConnection c = open(it.url, it.hd, "HEAD");
+                        it.size = c.getContentLengthLong();
+                        c.disconnect();
+                    } catch (Exception e) { }
+                    if (dead[0]) return;
+                    if (it.type.equals("v")) {
+                        MediaMetadataRetriever m = new MediaMetadataRetriever();
+                        try {
+                            m.setDataSource(it.url, it.hd);
+                            it.dur = pl(m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION));
+                            it.w = (int) pl(m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH));
+                            it.h = (int) pl(m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT));
+                            if (!it.isAudioFile && !dead[0]) {
+                                Bitmap f = m.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                                if (f != null) it.thumb = Bitmap.createScaledBitmap(f, 200, Math.max(1, f.getHeight() * 200 / f.getWidth()), true);
+                            }
+                        } catch (Exception e) { }
+                        finally { try { m.release(); } catch (Exception e) { } }
+                    } else {
+                        HttpURLConnection c = open(it.url, it.hd, "GET");
+                        InputStream in = c.getInputStream();
+                        BitmapFactory.Options o = new BitmapFactory.Options();
+                        o.inJustDecodeBounds = true;
+                        BitmapFactory.decodeStream(in, null, o);
+                        in.close();
+                        c.disconnect();
+                        it.w = o.outWidth;
+                        it.h = o.outHeight;
+                        if (it.w > 0 && it.size < 20000000 && !dead[0]) {
+                            c = open(it.url, it.hd, "GET");
+                            in = c.getInputStream();
+                            BitmapFactory.Options o2 = new BitmapFactory.Options();
+                            o2.inSampleSize = Math.max(1, it.w / 240);
+                            it.thumb = BitmapFactory.decodeStream(in, null, o2);
+                            in.close();
+                            c.disconnect();
+                        }
+                    }
+                } catch (Exception e) { }
+                it.info = describe(it);
+                if (!dead[0]) runOnUiThread(refresh);
+            }
+        });
+    }
+
+    View row(final Item it, final BaseAdapter ad) {
+        LinearLayout r = new LinearLayout(this);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(dp(8), dp(8), dp(8), dp(8));
+        final CheckBox cb = new CheckBox(this);
+        cb.setChecked(it.checked);
+        cb.setOnClickListener(v -> it.checked = cb.isChecked());
+        ImageView iv = new ImageView(this);
+        iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        iv.setBackgroundColor(CARD);
+        if (it.thumb != null) iv.setImageBitmap(it.thumb);
+        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(88), dp(62));
+        ip.setMargins(dp(4), 0, dp(10), 0);
+        LinearLayout tx = new LinearLayout(this);
+        tx.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this);
+        t.setText(it.title);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(14);
+        t.setMaxLines(2);
+        TextView n = new TextView(this);
+        n.setText(it.info);
+        n.setTextColor(0xFF8FD0FF);
+        n.setTextSize(12);
+        tx.addView(t);
+        tx.addView(n);
+        r.addView(cb);
+        r.addView(iv, ip);
+        r.addView(tx, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (it.type.equals("v") && !it.isAudioFile) {
+            TextView f = new TextView(this);
+            f.setText(it.audio ? "🎧" : "🎬");
+            f.setTextSize(24);
+            f.setPadding(dp(10), dp(4), dp(4), dp(4));
+            f.setOnClickListener(v -> { it.audio = !it.audio; it.info = describe(it); ad.notifyDataSetChanged(); });
+            r.addView(f);
+        }
+        r.setOnClickListener(v -> { it.checked = !it.checked; ad.notifyDataSetChanged(); });
+        return r;
+    }
+
+    void showDownloads(final String preferred) {
         web.evaluateJavascript(SCAN, res -> {
             LinkedHashMap<String, String> m = new LinkedHashMap<>();
-            synchronized (sniffed) { for (String s : sniffed) m.put(s, "v"); }
+            if (preferred != null) m.put(preferred, "v");
+            synchronized (sniffed) { for (String s : sniffed) if (!m.containsKey(s)) m.put(s, "v"); }
             try {
                 if (res != null && !res.equals("null")) {
                     JSONArray a = new JSONArray(String.valueOf(new JSONTokener(res).nextValue()));
@@ -343,34 +593,134 @@ public class MainActivity extends Activity {
                     }
                 }
             } catch (Exception ex) { }
-            final List<String> urls = new ArrayList<>();
-            List<String> labels = new ArrayList<>();
+            final List<Item> items = new ArrayList<>();
             for (Map.Entry<String, String> en : m.entrySet()) {
                 String u = en.getKey();
                 if (u.toLowerCase().contains(".m3u8")) continue;
-                urls.add(u);
-                labels.add((en.getValue().equals("v") ? "🎬 " : "🖼️ ") + nameOf(u));
+                Item it = new Item();
+                it.url = u;
+                it.type = en.getValue();
+                it.title = nameOf(u);
+                it.ext = extOf(u);
+                it.isAudioFile = it.ext.equals("mp3") || it.ext.equals("m4a");
+                it.hd = headersFor(u);
+                it.checked = preferred != null && u.equals(preferred);
+                items.add(it);
             }
-            if (urls.isEmpty()) {
+            if (items.isEmpty()) {
                 toast("No encontré archivos descargables directos en esta página. Los videos con transmisión protegida (como YouTube o Netflix) no se pueden descargar.");
                 return;
             }
-            final boolean[] chk = new boolean[urls.size()];
-            final AlertDialog dlg = new AlertDialog.Builder(this).setTitle("Descargar de esta página")
-                    .setMultiChoiceItems(labels.toArray(new String[0]), chk, (d, i, c) -> chk[i] = c)
+            final boolean[] dead = {false};
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            TextView hint = new TextView(this);
+            hint.setText("Toca 🎬 / 🎧 de cada video para elegir MP4 o solo audio (M4A).");
+            hint.setTextColor(0xFF8FB0D8);
+            hint.setTextSize(12);
+            hint.setPadding(dp(20), dp(4), dp(20), dp(8));
+            ListView lv = new ListView(this);
+            box.addView(hint);
+            box.addView(lv);
+            final BaseAdapter ad = new BaseAdapter() {
+                public int getCount() { return items.size(); }
+                public Object getItem(int i) { return items.get(i); }
+                public long getItemId(int i) { return i; }
+                public View getView(int i, View cv, ViewGroup p) { return row(items.get(i), this); }
+            };
+            lv.setAdapter(ad);
+            final AlertDialog dlg = new AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                    .setTitle("Descargar de esta página").setView(box)
                     .setPositiveButton("Descargar", (d, w) -> {
                         int n = 0;
-                        for (int i = 0; i < chk.length; i++) if (chk[i]) { download(urls.get(i), null, null); n++; }
+                        for (Item it : items) if (it.checked) { startItem(it); n++; }
                         if (n == 0) toast("No seleccionaste nada");
                     })
                     .setNegativeButton("Cancelar", null)
                     .setNeutralButton("Todo", null).create();
+            dlg.setOnDismissListener(d -> dead[0] = true);
             dlg.show();
             dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(x -> {
-                ListView lv = dlg.getListView();
-                for (int i = 0; i < chk.length; i++) { chk[i] = true; lv.setItemChecked(i, true); }
+                for (Item it : items) it.checked = true;
+                ad.notifyDataSetChanged();
             });
+            final Runnable refresh = () -> ad.notifyDataSetChanged();
+            for (Item it : items) loadMeta(it, refresh, dead);
         });
+    }
+
+    void startItem(Item it) {
+        String name = URLUtil.guessFileName(it.url, null, null);
+        if (it.audio && !it.isAudioFile) {
+            long id = download(it.url, null, null);
+            if (id > 0) {
+                int d = name.lastIndexOf('.');
+                audioJobs.put(id, d > 0 ? name.substring(0, d) : name);
+                toast("Descargando el video para extraer el audio…");
+            }
+        } else download(it.url, null, null);
+    }
+
+    void extract(long id, String base) {
+        try {
+            DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            Cursor c = dm.query(new DownloadManager.Query().setFilterById(id));
+            boolean ok = false;
+            if (c != null) {
+                if (c.moveToFirst()) ok = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) == DownloadManager.STATUS_SUCCESSFUL;
+                c.close();
+            }
+            if (!ok) return;
+            Uri src = dm.getUriForDownloadedFile(id);
+            if (src == null) throw new Exception("no se encontró el archivo");
+            MediaExtractor ex = new MediaExtractor();
+            ex.setDataSource(this, src, null);
+            int ti = -1;
+            MediaFormat fmt = null;
+            for (int i = 0; i < ex.getTrackCount(); i++) {
+                MediaFormat f = ex.getTrackFormat(i);
+                String mm = f.getString(MediaFormat.KEY_MIME);
+                if (mm != null && mm.startsWith("audio/")) { ti = i; fmt = f; break; }
+            }
+            if (ti < 0) { ex.release(); throw new Exception("el video no tiene pista de audio"); }
+            ex.selectTrack(ti);
+            final String name = base + ".m4a";
+            MediaMuxer mux;
+            ParcelFileDescriptor pfd = null;
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                cv.put(MediaStore.MediaColumns.MIME_TYPE, "audio/mp4");
+                cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/CpeBrowser");
+                Uri out = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                pfd = getContentResolver().openFileDescriptor(out, "rw");
+                mux = new MediaMuxer(pfd.getFileDescriptor(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            } else {
+                File d = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "CpeBrowser");
+                d.mkdirs();
+                mux = new MediaMuxer(new File(d, name).getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            }
+            int o = mux.addTrack(fmt);
+            mux.start();
+            ByteBuffer buf = ByteBuffer.allocate(1 << 20);
+            MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
+            while (true) {
+                buf.clear();
+                int n = ex.readSampleData(buf, 0);
+                if (n < 0) break;
+                bi.set(0, n, ex.getSampleTime(), (ex.getSampleFlags() & MediaExtractor.SAMPLE_FLAG_SYNC) != 0 ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
+                mux.writeSampleData(o, buf, bi);
+                ex.advance();
+            }
+            mux.stop();
+            mux.release();
+            ex.release();
+            if (pfd != null) pfd.close();
+            dm.remove(id);
+            runOnUiThread(() -> toast("🎧 Audio guardado: " + name + "\nEn Descargas/CpeBrowser"));
+        } catch (final Exception e) {
+            runOnUiThread(() -> toast("No se pudo extraer el audio (" + e.getMessage() + "). El video quedó descargado."));
+        }
     }
 
     void showMenu(View anchor) {
@@ -449,5 +799,10 @@ public class MainActivity extends Activity {
     protected void onResume() { super.onResume(); web.onResume(); }
 
     @Override
-    protected void onDestroy() { web.destroy(); super.onDestroy(); }
+    protected void onDestroy() {
+        try { unregisterReceiver(doneRx); } catch (Exception e) { }
+        pool.shutdownNow();
+        web.destroy();
+        super.onDestroy();
+    }
 }
