@@ -113,6 +113,7 @@ public class MainActivity extends Activity {
     WebChromeClient.CustomViewCallback cvCb;
     ValueCallback<Uri[]> fileCb;
     static final String HOOK = "(function(){if(window.__cpeh)return;window.__cpeh=1;document.addEventListener('play',function(e){var v=e.target;if(!v||v.tagName!=='VIDEO')return;CpeApp.onPlay(v.currentSrc||v.src||'')},true);var t=null,sx=0,sy=0;function pick(x,y){var els=document.elementsFromPoint(x,y);for(var i=0;i<els.length;i++){var el=els[i],u='',k='';if(el.tagName==='VIDEO'){u=el.currentSrc||el.src||'';if(!u){var s=el.querySelector('source');u=s?s.src:''}k='v'}else if(el.tagName==='IMG'){u=el.currentSrc||el.src||'';k='i'}else{var bg=getComputedStyle(el).backgroundImage||'';var a=bg.indexOf('url(');if(a>=0){var b=bg.indexOf(')',a);u=bg.substring(a+4,b).split(String.fromCharCode(34)).join('').split(String.fromCharCode(39)).join('');k='i'}}if(u){try{u=new URL(u,location.href).href}catch(e){}CpeApp.onPress(k,u);return}}}document.addEventListener('touchstart',function(e){var p=e.touches[0];sx=p.clientX;sy=p.clientY;clearTimeout(t);t=setTimeout(function(){pick(sx,sy)},600)},{passive:true,capture:true});document.addEventListener('touchmove',function(e){var p=e.touches[0];if(Math.abs(p.clientX-sx)>10||Math.abs(p.clientY-sy)>10)clearTimeout(t)},{passive:true,capture:true});document.addEventListener('touchend',function(){clearTimeout(t)},{passive:true,capture:true});document.addEventListener('touchcancel',function(){clearTimeout(t)},{passive:true,capture:true});})()";
+    static final String DETECT = "(function(){var c=[];function a(u){if(!u)return;try{u=new URL(u,location.href).href}catch(e){return}if(/^https?:/.test(u))c.push(u)}['meta[property=\"og:video\"]','meta[property=\"og:video:url\"]','meta[property=\"og:video:secure_url\"]','meta[name=\"twitter:player:stream\"]'].forEach(function(q){var m=document.querySelector(q);if(m)a(m.content)});document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src);v.querySelectorAll('source').forEach(function(s){a(s.src)})});return JSON.stringify(c)})()";
     final ExecutorService pool = Executors.newFixedThreadPool(3);
     final Map<Long, String> audioJobs = new ConcurrentHashMap<>();
     TextView offer;
@@ -368,6 +369,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView v, String pu) {
                 v.evaluateJavascript(HOOK, null);
+                v.evaluateJavascript(DETECT, res -> detect(res));
                 if (!url.hasFocus() && !pu.contains("inicio.cpe")) url.setText(pu);
             }
 
@@ -447,7 +449,7 @@ public class MainActivity extends Activity {
         else if (!in.contains(" ") && in.contains(".") && !in.endsWith(".")) u = "https://" + in;
         else u = "https://www.google.com/search?q=" + Uri.encode(in);
         if (u.startsWith("http") && isMediaExt(extOf(u))) { showLink(u, null); return; }
-        web.loadUrl(u);
+        if (u.startsWith("https://www.google.com/search?q=")) web.loadUrl(u); else probeThenOpen(u);
         ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(url.getWindowToken(), 0);
         url.clearFocus();
         web.requestFocus();
@@ -486,6 +488,73 @@ public class MainActivity extends Activity {
         String n = Uri.parse(u).getLastPathSegment();
         if (n == null || n.isEmpty()) n = u;
         return n.length() > 40 ? n.substring(0, 40) + "…" : n;
+    }
+
+    String probeType(String u, Map<String, String> hd) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                HttpURLConnection c = open(u, hd, attempt == 0 ? "HEAD" : "GET");
+                if (attempt == 1) c.setRequestProperty("Range", "bytes=0-0");
+                c.setConnectTimeout(4000);
+                c.setReadTimeout(4000);
+                int code = c.getResponseCode();
+                String ct = c.getContentType();
+                c.disconnect();
+                if (code < 400 && ct != null) return ct.toLowerCase();
+            } catch (Exception e) { }
+        }
+        return "";
+    }
+
+    void probeThenOpen(final String u) {
+        final Map<String, String> hd = headersFor(u);
+        url.setText(u);
+        bar.setVisibility(View.VISIBLE);
+        bar.setProgress(15);
+        pool.execute(new Runnable() {
+            public void run() {
+                final String ct = probeType(u, hd);
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        if (ct.startsWith("video/") || ct.startsWith("audio/") || ct.startsWith("image/")) {
+                            bar.setVisibility(View.GONE);
+                            showLink(u, null);
+                        } else if (ct.contains("mpegurl")) {
+                            bar.setVisibility(View.GONE);
+                            toast("Este enlace es una transmisión por fragmentos (HLS); no se puede descargar como un solo archivo.");
+                        } else web.loadUrl(u);
+                    }
+                });
+            }
+        });
+    }
+
+    void found(String u) {
+        playing = u;
+        offer.setVisibility(View.VISIBLE);
+        offer.bringToFront();
+        offer.removeCallbacks(hideOffer);
+        offer.postDelayed(hideOffer, 10000);
+    }
+
+    void detect(String res) {
+        try {
+            if (res == null || res.equals("null")) return;
+            JSONArray a = new JSONArray(String.valueOf(new JSONTokener(res).nextValue()));
+            int n = Math.min(a.length(), 3);
+            for (int i = 0; i < n; i++) {
+                final String u = a.getString(i);
+                if (u.toLowerCase().contains(".m3u8")) continue;
+                if (guessType(extOf(u)).equals("v")) { found(u); return; }
+                final Map<String, String> hd = headersFor(u);
+                pool.execute(new Runnable() {
+                    public void run() {
+                        String ct = probeType(u, hd);
+                        if (ct.startsWith("video/")) runOnUiThread(new Runnable() { public void run() { found(u); } });
+                    }
+                });
+            }
+        } catch (Exception e) { }
     }
 
     void handlePlay(String src) {
