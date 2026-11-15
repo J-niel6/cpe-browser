@@ -101,12 +101,8 @@ public class MainActivity extends Activity {
             + "document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src,'v');v.querySelectorAll('source').forEach(function(s){a(s.src,'v')})});"
             + "['og:video','og:video:url','og:video:secure_url','twitter:player:stream'].forEach(function(k){var m=document.querySelector('meta[property=\"'+k+'\"],meta[name=\"'+k+'\"]');if(m)a(m.content,'v')});"
             + "document.querySelectorAll('img').forEach(function(i){if((i.naturalWidth||0)>=120)a(i.currentSrc||i.src,'i')});"
-            + "document.querySelectorAll('a[href]').forEach(function(l){var h=l.href;if(/\.(mp4|webm|mkv|mov|m4v|ogv|3gp|mp3|m4a|ogg|wav|aac|flac)(\?|$)/i.test(h))a(h,'v');else if(/\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(h))a(h,'i')});"
+            + "document.querySelectorAll('a[href]').forEach(function(l){var h=l.href;if(/\\.(mp4|webm|mkv|mov|m4v|ogv|3gp|mp3|m4a|ogg|wav|aac|flac)(\\?|$)/i.test(h))a(h,'v');else if(/\\.(jpe?g|png|gif|webp|bmp)(\\?|$)/i.test(h))a(h,'i')});"
             + "try{performance.getEntriesByType('resource').forEach(function(e){a(e.name,'v')})}catch(e){}return JSON.stringify(o)})()";
-            + "document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src,'v');v.querySelectorAll('source').forEach(function(s){a(s.src,'v')})});"
-            + "document.querySelectorAll('img').forEach(function(i){if((i.naturalWidth||0)>=120)a(i.currentSrc||i.src,'i')});"
-            + "document.querySelectorAll('a[href]').forEach(function(l){var h=l.href;if(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a)(\\?|$)/i.test(h))a(h,'v');else if(/\\.(jpe?g|png|gif|webp|pdf|zip)(\\?|$)/i.test(h))a(h,'i')});"
-            + "return JSON.stringify(o)})()";
 
     WebView web;
     EditText url;
