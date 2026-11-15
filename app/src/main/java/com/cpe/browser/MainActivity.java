@@ -457,29 +457,46 @@ public class MainActivity extends Activity {
 
     long download(String u, String cd, String mime) {
         try {
-            if (u == null || !u.startsWith("http")) { toast("Este enlace no se puede descargar directamente"); return -1; }
+            if (u == null || !(u.startsWith("https://") || u.startsWith("http://"))) {
+                toast("El enlace no es una dirección HTTP/HTTPS válida");
+                return -1;
+            }
             DownloadManager.Request r = new DownloadManager.Request(Uri.parse(u));
-            String name = URLUtil.guessFileName(u, cd, mime);
-            if (mime != null && (mime.startsWith("video/") || mime.startsWith("audio/") || mime.startsWith("image/"))) {
-                String want = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime.split(";")[0].trim());
-                if (want != null && !name.toLowerCase().endsWith("." + want)) {
-                    int dd = name.lastIndexOf('.');
-                    name = (dd > 0 ? name.substring(0, dd) : name) + "." + want;
+            String cleanMime = mime == null ? "" : mime.split(";")[0].trim().toLowerCase(Locale.ROOT);
+            String name = URLUtil.guessFileName(u, cd, cleanMime);
+            if (name == null || name.trim().isEmpty()) name = "descarga_" + System.currentTimeMillis();
+            // Evita rutas y caracteres que pueden provocar nombres inválidos en Android.
+            name = name.replaceAll("[/\\\\:*?\"<>|\\r\\n]", "_").trim();
+            while (name.startsWith(".")) name = name.substring(1);
+            if (name.isEmpty()) name = "descarga_" + System.currentTimeMillis();
+
+            String ext = extOf(name);
+            if (!cleanMime.isEmpty()) {
+                String wanted = MimeTypeMap.getSingleton().getExtensionFromMimeType(cleanMime);
+                if (wanted != null && !wanted.isEmpty() && !wanted.equalsIgnoreCase(ext)) {
+                    int dot = name.lastIndexOf('.');
+                    name = (dot > 0 ? name.substring(0, dot) : name) + "." + wanted;
                 }
             }
+            if (cleanMime.isEmpty()) {
+                String guessed = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase(Locale.ROOT));
+                if (guessed != null) cleanMime = guessed;
+            }
+
             String ck = CookieManager.getInstance().getCookie(u);
-            if (ck != null) r.addRequestHeader("Cookie", ck);
+            if (ck != null && !ck.isEmpty()) r.addRequestHeader("Cookie", ck);
             r.addRequestHeader("User-Agent", web.getSettings().getUserAgentString());
-            if (web.getUrl() != null) r.addRequestHeader("Referer", web.getUrl());
+            if (web.getUrl() != null && web.getUrl().startsWith("http")) r.addRequestHeader("Referer", web.getUrl());
             r.setTitle(name);
+            r.setDescription("Cpe Browser · Descargas");
             r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "CpeBrowser/" + name);
-            if (mime != null && !mime.isEmpty()) r.setMimeType(mime);
+            if (!cleanMime.isEmpty()) r.setMimeType(cleanMime);
             long id = ((DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE)).enqueue(r);
             toast("Descargando: " + name + "\nSe guarda en Descargas/CpeBrowser");
             return id;
         } catch (Exception e) {
-            toast("No se pudo descargar: " + e.getMessage());
+            toast("No se pudo iniciar la descarga: " + e.getMessage());
             return -1;
         }
     }
@@ -491,17 +508,24 @@ public class MainActivity extends Activity {
     }
 
     String probeType(String u, Map<String, String> hd) {
-        for (int attempt = 0; attempt < 2; attempt++) {
+        // Algunos servidores no implementan HEAD; en ese caso se consulta solo el primer byte.
+        String[] methods = new String[]{"HEAD", "GET"};
+        for (int attempt = 0; attempt < methods.length; attempt++) {
+            HttpURLConnection c = null;
             try {
-                HttpURLConnection c = open(u, hd, attempt == 0 ? "HEAD" : "GET");
+                c = open(u, hd, methods[attempt]);
                 if (attempt == 1) c.setRequestProperty("Range", "bytes=0-0");
-                c.setConnectTimeout(4000);
-                c.setReadTimeout(4000);
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(7000);
+                c.setReadTimeout(7000);
                 int code = c.getResponseCode();
                 String ct = c.getContentType();
-                c.disconnect();
-                if (code < 400 && ct != null) return ct.toLowerCase();
-            } catch (Exception e) { }
+                if (code >= 200 && code < 400 && ct != null && !ct.trim().isEmpty()) return ct.toLowerCase(Locale.ROOT);
+            } catch (Exception e) {
+                // Se intenta el método alternativo; no se interpreta el fallo como un video descargable.
+            } finally {
+                if (c != null) c.disconnect();
+            }
         }
         return "";
     }
@@ -639,9 +663,22 @@ public class MainActivity extends Activity {
                 try {
                     try {
                         HttpURLConnection c = open(it.url, it.hd, "HEAD");
+                        int status = c.getResponseCode();
                         it.size = c.getContentLengthLong();
                         String ct = c.getContentType();
                         c.disconnect();
+                        if ((status >= 400 || ct == null || ct.trim().isEmpty()) && !dead[0]) {
+                            c = open(it.url, it.hd, "GET");
+                            c.setRequestProperty("Range", "bytes=0-0");
+                            status = c.getResponseCode();
+                            if (it.size <= 0) {
+                                String cr = c.getHeaderField("Content-Range");
+                                if (cr != null && cr.contains("/")) it.size = pl(cr.substring(cr.lastIndexOf('/') + 1));
+                                else it.size = c.getContentLengthLong();
+                            }
+                            ct = c.getContentType();
+                            c.disconnect();
+                        }
                         if (ct != null) {
                             ct = ct.toLowerCase();
                             it.mime = ct;
