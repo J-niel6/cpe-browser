@@ -97,7 +97,12 @@ public class MainActivity extends Activity {
             + "<a style='color:#8fd0ff' href='https://www.pexels.com'>Pexels</a></p>"
             + "<p><a style='display:inline-block;background:#3BA4FF;color:#fff;padding:12px 20px;border-radius:24px;text-decoration:none' href='cpe://link'>⬇ Descargar desde un enlace</a></p>"
             + "<p style='color:#8fb0d8;font-size:14px'>Mantén pulsada cualquier foto o video para descargarlo, o pega el enlace directo de un archivo en la barra.</p></body></html>";
-    static final String SCAN = "(function(){var o=[];function a(u,t){if(!u)return;try{u=new URL(u,location.href).href;if(/^https?:/.test(u))o.push([t,u])}catch(e){}}"
+    static final String SCAN = "(function(){var o=[],seen={};function a(u,t){if(!u)return;try{u=new URL(u,location.href).href;if(!/^https?:/.test(u)||seen[u])return;var p=new URL(u).pathname.toLowerCase();if(/\\.(m3u8|mpd|mp2t|ts|m4s)(\\?|$)/.test(p))return;if(t==='v'&&/\\.(mp4|webm|mkv|mov|m4v|ogv|3gp)(\\?|$)/.test(p)===false&&!/[?&](mime|type)=video%2f(mp4|webm)/i.test(u))return;seen[u]=1;o.push([t,u])}catch(e){}}"
+            + "document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src,'v');v.querySelectorAll('source').forEach(function(s){a(s.src,'v')})});"
+            + "['og:video','og:video:url','og:video:secure_url','twitter:player:stream'].forEach(function(k){var m=document.querySelector('meta[property=\"'+k+'\"],meta[name=\"'+k+'\"]');if(m)a(m.content,'v')});"
+            + "document.querySelectorAll('img').forEach(function(i){if((i.naturalWidth||0)>=120)a(i.currentSrc||i.src,'i')});"
+            + "document.querySelectorAll('a[href]').forEach(function(l){var h=l.href;if(/\.(mp4|webm|mkv|mov|m4v|ogv|3gp|mp3|m4a|ogg|wav|aac|flac)(\?|$)/i.test(h))a(h,'v');else if(/\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(h))a(h,'i')});"
+            + "try{performance.getEntriesByType('resource').forEach(function(e){a(e.name,'v')})}catch(e){}return JSON.stringify(o)})()";
             + "document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src,'v');v.querySelectorAll('source').forEach(function(s){a(s.src,'v')})});"
             + "document.querySelectorAll('img').forEach(function(i){if((i.naturalWidth||0)>=120)a(i.currentSrc||i.src,'i')});"
             + "document.querySelectorAll('a[href]').forEach(function(l){var h=l.href;if(/\\.(mp4|webm|mkv|mov|m4v|mp3|m4a)(\\?|$)/i.test(h))a(h,'v');else if(/\\.(jpe?g|png|gif|webp|pdf|zip)(\\?|$)/i.test(h))a(h,'i')});"
@@ -113,7 +118,10 @@ public class MainActivity extends Activity {
     WebChromeClient.CustomViewCallback cvCb;
     ValueCallback<Uri[]> fileCb;
     static final String HOOK = "(function(){if(window.__cpeh)return;window.__cpeh=1;document.addEventListener('play',function(e){var v=e.target;if(!v||v.tagName!=='VIDEO')return;CpeApp.onPlay(v.currentSrc||v.src||'')},true);var t=null,sx=0,sy=0;function pick(x,y){var els=document.elementsFromPoint(x,y);for(var i=0;i<els.length;i++){var el=els[i],u='',k='';if(el.tagName==='VIDEO'){u=el.currentSrc||el.src||'';if(!u){var s=el.querySelector('source');u=s?s.src:''}k='v'}else if(el.tagName==='IMG'){u=el.currentSrc||el.src||'';k='i'}else{var bg=getComputedStyle(el).backgroundImage||'';var a=bg.indexOf('url(');if(a>=0){var b=bg.indexOf(')',a);u=bg.substring(a+4,b).split(String.fromCharCode(34)).join('').split(String.fromCharCode(39)).join('');k='i'}}if(u){try{u=new URL(u,location.href).href}catch(e){}CpeApp.onPress(k,u);return}}}document.addEventListener('touchstart',function(e){var p=e.touches[0];sx=p.clientX;sy=p.clientY;clearTimeout(t);t=setTimeout(function(){pick(sx,sy)},600)},{passive:true,capture:true});document.addEventListener('touchmove',function(e){var p=e.touches[0];if(Math.abs(p.clientX-sx)>10||Math.abs(p.clientY-sy)>10)clearTimeout(t)},{passive:true,capture:true});document.addEventListener('touchend',function(){clearTimeout(t)},{passive:true,capture:true});document.addEventListener('touchcancel',function(){clearTimeout(t)},{passive:true,capture:true});})()";
-    static final String DETECT = "(function(){var c=[];function a(u){if(!u)return;try{u=new URL(u,location.href).href}catch(e){return}if(/^https?:/.test(u))c.push(u)}['meta[property=\"og:video\"]','meta[property=\"og:video:url\"]','meta[property=\"og:video:secure_url\"]','meta[name=\"twitter:player:stream\"]'].forEach(function(q){var m=document.querySelector(q);if(m)a(m.content)});document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src);v.querySelectorAll('source').forEach(function(s){a(s.src)})});return JSON.stringify(c)})()";
+    static final String DETECT = "(function(){var c=[],seen={};function a(u){if(!u)return;try{u=new URL(u,location.href).href}catch(e){return}if(!/^https?:/.test(u)||seen[u])return;var p=new URL(u).pathname.toLowerCase();if(/\\.(m3u8|mpd|mp2t|ts|m4s)$/.test(p))return;if(/\\.(mp4|webm|mkv|mov|m4v|ogv|3gp)(\\?|$)/.test(p)||/[?&](mime|type)=video%2f(mp4|webm)/i.test(u)){seen[u]=1;c.push(u)}}"
+            + "['og:video','og:video:url','og:video:secure_url','twitter:player:stream'].forEach(function(k){var m=document.querySelector('meta[property=\"'+k+'\"],meta[name=\"'+k+'\"]');if(m)a(m.content)});"
+            + "document.querySelectorAll('video').forEach(function(v){a(v.currentSrc||v.src);v.querySelectorAll('source').forEach(function(s){a(s.src)})});"
+            + "try{performance.getEntriesByType('resource').forEach(function(e){a(e.name)})}catch(e){}return JSON.stringify(c)})()";
     final ExecutorService pool = Executors.newFixedThreadPool(3);
     final Map<Long, String> audioJobs = new ConcurrentHashMap<>();
     TextView offer;
@@ -376,10 +384,7 @@ public class MainActivity extends Activity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
                 String u = r.getUrl().toString();
-                String l = u.toLowerCase();
-                int q = l.indexOf('?');
-                String p = q > 0 ? l.substring(0, q) : l;
-                if (p.matches(".*\\.(mp4|webm|mkv|mov|m4v|mp3|m4a)$") && sniffed.add(u)) runOnUiThread(() -> badge());
+                if (isDirectMediaUrl(u) && sniffed.add(u)) runOnUiThread(() -> badge());
                 return null;
             }
         });
@@ -545,7 +550,7 @@ public class MainActivity extends Activity {
                             showLink(u, null);
                         } else if (ct.contains("mpegurl")) {
                             bar.setVisibility(View.GONE);
-                            toast("Este enlace es una transmisión por fragmentos (HLS); no se puede descargar como un solo archivo.");
+                            toast("Este enlace es una lista de reproducción HLS, no un archivo único. La app no reconstruye ni evita protecciones de transmisiones.");
                         } else web.loadUrl(u);
                     }
                 });
@@ -568,8 +573,8 @@ public class MainActivity extends Activity {
             int n = Math.min(a.length(), 3);
             for (int i = 0; i < n; i++) {
                 final String u = a.getString(i);
-                if (u.toLowerCase().contains(".m3u8")) continue;
-                if (guessType(extOf(u)).equals("v")) { found(u); return; }
+                if (!isDirectMediaUrl(u)) continue;
+                if (guessType(extOf(Uri.parse(u).getPath() == null ? u : Uri.parse(u).getPath())).equals("v")) { found(u); return; }
                 final Map<String, String> hd = headersFor(u);
                 pool.execute(new Runnable() {
                     public void run() {
@@ -583,10 +588,10 @@ public class MainActivity extends Activity {
 
     void handlePlay(String src) {
         String cand = null;
-        if (src != null && src.startsWith("http") && !src.toLowerCase().contains(".m3u8")) cand = src;
+        if (isDirectMediaUrl(src)) cand = src;
         else synchronized (sniffed) { for (String x : sniffed) cand = x; }
         if (cand == null) {
-            if (!warned) { warned = true; toast("Este video usa transmisión protegida o por fragmentos; no se puede descargar."); }
+            if (!warned) { warned = true; toast("No se detectó un archivo de video directo. Puede ser una transmisión segmentada o protegida que esta app no extrae."); }
             return;
         }
         playing = cand;
@@ -602,6 +607,22 @@ public class MainActivity extends Activity {
         if (q > 0) p = p.substring(0, q);
         int d = p.lastIndexOf('.');
         return d >= 0 && p.length() - d <= 5 ? p.substring(d + 1) : "";
+    }
+
+    // Solo considera archivos multimedia individuales; no confunde manifiestos ni fragmentos con un video completo.
+    boolean isDirectMediaUrl(String u) {
+        if (u == null || !(u.startsWith("https://") || u.startsWith("http://"))) return false;
+        try {
+            String path = Uri.parse(u).getPath();
+            if (path == null) path = "";
+            String p = path.toLowerCase(Locale.ROOT);
+            if (p.endsWith(".m3u8") || p.endsWith(".mpd") || p.endsWith(".ts") || p.endsWith(".m4s") || p.endsWith(".mp2t")) return false;
+            String e = extOf(p);
+            if (e.matches("mp4|webm|mkv|mov|m4v|ogv|3gp|mp3|m4a|ogg|wav|aac|flac|jpg|jpeg|png|gif|webp|bmp")) return true;
+            String rawQuery = Uri.parse(u).getEncodedQuery();
+            String q = rawQuery == null ? "" : Uri.decode(rawQuery).toLowerCase(Locale.ROOT);
+            return q.contains("mime=video/") || q.contains("type=video/");
+        } catch (Exception ignored) { return false; }
     }
 
     Map<String, String> headersFor(String u) {
@@ -792,7 +813,9 @@ public class MainActivity extends Activity {
             final List<Item> items = new ArrayList<>();
             for (Map.Entry<String, String> en : m.entrySet()) {
                 String u = en.getKey();
-                if (u.toLowerCase().contains(".m3u8")) continue;
+                String path = Uri.parse(u).getPath();
+                String lowerPath = path == null ? u.toLowerCase(Locale.ROOT) : path.toLowerCase(Locale.ROOT);
+                if (lowerPath.endsWith(".m3u8") || lowerPath.endsWith(".mpd") || lowerPath.endsWith(".ts") || lowerPath.endsWith(".m4s") || lowerPath.endsWith(".mp2t")) continue;
                 Item it = new Item();
                 it.url = u;
                 it.type = en.getValue();
@@ -804,7 +827,7 @@ public class MainActivity extends Activity {
                 items.add(it);
             }
             if (items.isEmpty()) {
-                toast("No encontré archivos descargables directos en esta página. Los videos con transmisión protegida (como YouTube o Netflix) no se pueden descargar.");
+                toast("No encontré un archivo multimedia directo. Algunas plataformas entregan transmisiones segmentadas o protegidas; Cpe Browser no las extrae ni evita esas protecciones.");
                 return;
             }
             final boolean[] dead = {false};
@@ -847,7 +870,8 @@ public class MainActivity extends Activity {
 
     boolean isMediaExt(String e) {
         return e.equals("jpg") || e.equals("jpeg") || e.equals("png") || e.equals("gif") || e.equals("webp") || e.equals("bmp")
-                || e.equals("mp4") || e.equals("webm") || e.equals("mkv") || e.equals("mov") || e.equals("m4v") || e.equals("mp3") || e.equals("m4a");
+                || e.equals("mp4") || e.equals("webm") || e.equals("mkv") || e.equals("mov") || e.equals("m4v") || e.equals("ogv") || e.equals("3gp")
+                || e.equals("mp3") || e.equals("m4a") || e.equals("ogg") || e.equals("wav") || e.equals("aac") || e.equals("flac");
     }
 
     String guessType(String e) {
